@@ -1,4 +1,4 @@
-# Guía de Estudio: React + REST API con JWT
+# Guía de Estudio: React + REST API con JWT (Estructura Simplificada)
 
 ## Patrón completo — de memoria
 
@@ -6,95 +6,88 @@
 ```
 src/
   api/
-    apiClient.js        ← axios con interceptor JWT
-    entidadApi.js       ← funciones de cada endpoint
-  store/
-    authStore.js        ← estado del token (tanstack/react-store)
-  pages/
-    LoginPage.jsx
-    DashboardPage.jsx   (o FeedPage.jsx)
+    axiosInstance.js    ← axios con interceptores (JWT + extractor de .data)
+    genericApi.js       ← funciones de cada endpoint (CRUD)
   components/
-    EntidadCard.jsx     ← muestra + acciones de un item
-    EntidadForm.jsx     ← formulario de creación
-  routes/
-    Router.jsx          ← rutas + ProtectedRoute
-  main.jsx
+    ProtectedRoute.jsx  ← guardia de ruta que verifica localStorage
+    ItemCard.jsx        ← tarjeta autónoma (hace PUT/DELETE y llama onRefresh)
+    ItemForm.jsx        ← formulario de creación (o integrado en DashboardPage)
+  pages/
+    LoginPage.jsx       ← formulario de login (guarda token en localStorage)
+    DashboardPage.jsx   ← vista principal con el listado
+  App.jsx               ← enrutamiento con react-router (<BrowserRouter>)
+  main.jsx              ← punto de entrada (renderiza <App />)
 ```
 
 ---
 
-### 2. apiClient.js — interceptor JWT (SIEMPRE IGUAL)
+### 2. axiosInstance.js — Interceptor JWT y Response extractor (SIEMPRE IGUAL)
 ```js
 import axios from "axios";
 
-const apiClient = axios.create({
-    baseURL: "http://localhost:8080/api/v1",
+const axiosInstance = axios.create({
+    baseURL: "/api/v1", // URL relativa para usar con el Proxy de Vite
 });
 
-apiClient.interceptors.request.use((config) => {
+// Request interceptor: adjunta el token JWT
+axiosInstance.interceptors.request.use((config) => {
     const token = localStorage.getItem("token");
     if (token) config.headers.Authorization = `Bearer ${token}`;
     return config;
 });
 
-export default apiClient;
+// Response interceptor: extrae .data automáticamente
+axiosInstance.interceptors.response.use((response) => response.data);
+
+export default axiosInstance;
 ```
 
 ---
 
-### 3. authStore.js — estado del token
-```js
-import { Store } from "@tanstack/react-store";
-
-export const authStore = new Store({
-    token: localStorage.getItem("token") || null,
-    isAuthenticated: !!localStorage.getItem("token"),
-});
-
-export const setToken = (token) => {
-    localStorage.setItem("token", token);
-    authStore.setState(() => ({ token, isAuthenticated: true }));
-};
-
-export const clearToken = () => {
-    localStorage.removeItem("token");
-    authStore.setState(() => ({ token: null, isAuthenticated: false }));
-};
-```
-
----
-
-### 4. Router.jsx — ruta protegida
+### 3. ProtectedRoute.jsx — Guardia de ruta (SIEMPRE IGUAL)
 ```jsx
-import { createBrowserRouter, Navigate } from "react-router";
-import LoginPage from "../pages/LoginPage";
-import DashboardPage from "../pages/DashboardPage";
+import { Navigate } from "react-router";
 
 function ProtectedRoute({ children }) {
     const token = localStorage.getItem("token");
-    if (!token) return <Navigate to="/" replace />;
+    if (!token) return <Navigate to="/login" replace />;
     return children;
 }
 
-const router = createBrowserRouter([
-    { path: "/", element: <LoginPage /> },
-    {
-        path: "/dashboard",
-        element: <ProtectedRoute><DashboardPage /></ProtectedRoute>,
-    },
-]);
-
-export default router;
+export default ProtectedRoute;
 ```
 
 ---
 
-### 5. LoginPage.jsx — flujo completo
+### 4. App.jsx — Enrutamiento Central
+```jsx
+import { BrowserRouter, Routes, Route, Navigate } from "react-router";
+import LoginPage from "./pages/LoginPage";
+import DashboardPage from "./pages/DashboardPage";
+import ProtectedRoute from "./components/ProtectedRoute";
+
+function App() {
+    return (
+        <BrowserRouter>
+            <Routes>
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+        </BrowserRouter>
+    );
+}
+
+export default App;
+```
+
+---
+
+### 5. LoginPage.jsx — Flujo completo
 ```jsx
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { login } from "../api/entidadApi";
-import { setToken } from "../store/authStore";
+import { login } from "../api/genericApi";
 
 function LoginPage() {
     const navigate = useNavigate();
@@ -105,9 +98,10 @@ function LoginPage() {
     const handleSubmit = async (e) => {
         e.preventDefault();
         try {
+            // El response interceptor ya extrae la data, obtenemos el token directo
             const res = await login(username, password);
-            setToken(res.data.token);   // guardar token
-            navigate("/dashboard");     // redirigir
+            localStorage.setItem("token", res.token || res.accessToken || res); 
+            navigate("/"); // Redirige al Dashboard
         } catch {
             setError("Credenciales incorrectas.");
         }
@@ -115,66 +109,82 @@ function LoginPage() {
 
     return (
         <form onSubmit={handleSubmit}>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} />
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input value={username} onChange={(e) => setUsername(e.target.value)} required />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
             {error && <p>{error}</p>}
             <button type="submit">Ingresar</button>
         </form>
     );
 }
+
+export default LoginPage;
 ```
 
 ---
 
-### 6. DashboardPage.jsx — CRUD completo
+### 6. DashboardPage.jsx — Carga y renderizado
 ```jsx
 import { useEffect, useState } from "react";
-import { getItems, createItem, updateItem, deleteItem } from "../api/entidadApi";
+import { getAll, create } from "../api/genericApi";
+import ItemCard from "../components/ItemCard";
 
 function DashboardPage() {
     const [items, setItems] = useState([]);
 
-    // Cargar al montar
     useEffect(() => { fetchItems(); }, []);
 
     const fetchItems = async () => {
-        const res = await getItems();
-        setItems(res.data);
+        // Obtenemos los datos directamente sin escribir res.data
+        const data = await getAll();
+        setItems(data);
     };
 
-    const handleCreate = async (data) => {
-        await createItem(data);
-        await fetchItems();          // refrescar lista
+    const handleCreate = async (formData) => {
+        await create(formData);
+        await fetchItems(); // refrescar
     };
 
-    const handleUpdate = async (id, data) => {
-        await updateItem(id, data);
-        await fetchItems();
-    };
-
-    const handleDelete = async (id) => {
-        await deleteItem(id);
-        setItems((prev) => prev.filter((item) => item.id !== id)); // optimista
-    };
-    
-    // ...JSX
+    return (
+        <div>
+            {/* Formulario e Items */}
+            {items.map((item) => (
+                <ItemCard key={item.id} item={item} onRefresh={fetchItems} />
+            ))}
+        </div>
+    );
 }
+
+export default DashboardPage;
 ```
 
 ---
 
-### 7. main.jsx — setup
+### 7. ItemCard.jsx — Acciones autónomas
 ```jsx
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { RouterProvider } from "react-router";
-import router from "./routes/Router";
+import { useState } from "react";
+import { update, remove } from "../api/genericApi";
 
-createRoot(document.getElementById("root")).render(
-    <StrictMode>
-        <RouterProvider router={router} />
-    </StrictMode>
-);
+function ItemCard({ item, onRefresh }) {
+    const [estado, setEstado] = useState(item.estado);
+
+    const handleEstadoChange = async (nuevoEstado) => {
+        setEstado(nuevoEstado);
+        try {
+            await update(item.id, { nombreCampo: item.nombreCampo, estado: nuevoEstado });
+            onRefresh(); // Notifica al Dashboard para recargar
+        } catch {
+            setEstado(item.estado); // Revierte
+        }
+    };
+
+    const handleDelete = async () => {
+        if (!window.confirm("¿Eliminar?")) return;
+        await remove(item.id);
+        onRefresh();
+    };
+
+    // ... renderizado visual
+}
 ```
 
 ---
@@ -196,7 +206,6 @@ createRoot(document.getElementById("root")).render(
 | PEDIDOS | Domicilio | `/api/v1/domicilios` | `nombreDomiciliario`, `estado`, `userId` |
 | VUELOS | Vuelo | `/api/v1/vuelos` | `numeroVuelo`, `estado`, `aerolineaId` |
 | REDSOCIAL | Post | `/api/v1/posts` | `content` |
-| REDSOCIAL | Comment | `/api/v1/posts/{id}/comments` | `content` |
 
 ## Estados por examen
 
@@ -209,14 +218,14 @@ createRoot(document.getElementById("root")).render(
 
 ## Checklist del examen (en orden)
 
-1. [ ] Leer el PDF del examen completo
-2. [ ] Crear las carpetas: `api/`, `store/`, `pages/`, `components/`, `routes/`
-3. [ ] Crear `apiClient.js` con el baseURL correcto y el interceptor
-4. [ ] Crear `authStore.js`
-5. [ ] Crear `Router.jsx` con `ProtectedRoute`
-6. [ ] Crear `LoginPage.jsx` — `POST /auth/login` → guardar token → navegar
-7. [ ] Actualizar `main.jsx` para usar `RouterProvider`
-8. [ ] Crear `DashboardPage.jsx` — `useEffect` para cargar items
-9. [ ] Crear componente del item (Card) — mostrar info + Select estado + botón eliminar
-10. [ ] Crear formulario de creación (Form)
-11. [ ] Conectar todo: onUpdate, onDelete, onCreated
+1. [ ] Leer el PDF del examen completo.
+2. [ ] Configurar el proxy de desarrollo en `vite.config.js` apuntando al puerto del backend.
+3. [ ] Crear `api/axiosInstance.js` con el baseURL relativo y los interceptores.
+4. [ ] Crear la API de la entidad y la de autenticación en `api/`.
+5. [ ] Crear `components/ProtectedRoute.jsx` para proteger rutas.
+6. [ ] Crear `App.jsx` configurando las rutas con `react-router`.
+7. [ ] Actualizar `main.jsx` para renderizar `<App />`.
+8. [ ] Crear `LoginPage.jsx` — guarda token en localStorage y navega a `/`.
+9. [ ] Crear `DashboardPage.jsx` — consulta el listado al montar con `useEffect`.
+10. [ ] Crear `components/ItemCard.jsx` — gestiona sus llamadas API de actualización/eliminación y ejecuta `onRefresh`.
+11. [ ] Conectar creación en Dashboard y listado de tarjetas.
